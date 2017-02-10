@@ -84,21 +84,21 @@ namespace CNTK
             InvalidArgument("Training minibatch source is not allowed to be null.");
         if (!trainer)
             InvalidArgument("Trainer is not allowed to be null.");
-        if(modelInputToMinibatchSourceStream.empty())
+        if (modelInputToMinibatchSourceStream.empty())
             InvalidArgument("Input mapping is not allowed to be empty.");
 
         if (m_checkPointFileName.empty())
         {
-            if(checkpointFrequencyInSamples != 0 && checkpointFrequencyInSamples != std::numeric_limits<size_t>::max())
+            if (checkpointFrequencyInSamples != 0 && checkpointFrequencyInSamples != std::numeric_limits<size_t>::max())
                 InvalidArgument("Checkpoint file name is not allowed to be empty if checkpoint frequency is non zero.");
-            if(saveAllCheckpoints)
+            if (saveAllCheckpoints)
                 InvalidArgument("Checkpoint file name is not allowed to be empty if 'save all checkpoints' is specified.");
             checkpointFrequencyInSamples = 0;
         }
 
         if (!m_crossValidationSource)
         {
-            if(crossValidationFrequencyInSamples != 0 && crossValidationFrequencyInSamples != std::numeric_limits<size_t>::max())
+            if (crossValidationFrequencyInSamples != 0 && crossValidationFrequencyInSamples != std::numeric_limits<size_t>::max())
                 InvalidArgument("Cross validation minibatch source is not allowed to be empty.");
             crossValidationFrequencyInSamples = 0;
         }
@@ -107,7 +107,7 @@ namespace CNTK
         // We will take the maximum warm up period required.
         auto learners = trainer->ParameterLearners();
         m_parallelAfterSamples = 0;
-        for (const auto& l: learners)
+        for (const auto& l : learners)
         {
             auto distributed = std::dynamic_pointer_cast<DistributedLearner>(l);
             if (distributed)
@@ -122,14 +122,14 @@ namespace CNTK
         if (checkpointFrequencyInSamples != 0)
             m_actions.push_back({ checkpointFrequencyInSamples, 0, 0,
                 [this](size_t currentIndex, const DeviceDescriptor&)
-                {
-                    SaveCheckpoint(currentIndex); 
-                    // enable profiler after the first checkpoint
-                    // This has effect only if the profiler is globally enabled by StartProfiler()
-                    Microsoft::MSR::CNTK::ProfilerEnable(true);
-                } });
+        {
+            SaveCheckpoint(currentIndex);
+            // enable profiler after the first checkpoint
+            // This has effect only if the profiler is globally enabled by StartProfiler()
+            Microsoft::MSR::CNTK::ProfilerEnable(true);
+        } });
 
-        if(crossValidationFrequencyInSamples != 0)
+        if (crossValidationFrequencyInSamples != 0)
             m_actions.push_back({ crossValidationFrequencyInSamples, 0, 0,
                 [this](size_t currentIndex, const DeviceDescriptor& d) { CrossValidate(currentIndex, d); } });
 
@@ -159,11 +159,9 @@ namespace CNTK
                 ? m_maxNumberOfSamples - m_trainer->TotalNumberOfSamplesSeen()
                 : 0;
 
-            if (!GetTrainingMinibatch(minibatch, samplesLeft, computeDevice))
-            {
-                // There are no minibatches anymore, so training must stop.
-                break;
-            }
+            // Note that in case of distributed training we don't want to stop if the local minibatch
+            // is empty - it is possible that the other workers are still processing their minibatches.
+            GetTrainingMinibatch(minibatch, samplesLeft, computeDevice);
 
             // Train on the minibatch.
             OnMinibatchStart();
@@ -189,7 +187,7 @@ namespace CNTK
         if (restoredNumberOfSamples != m_trainer->TotalNumberOfSamplesSeen())
         {
             // Let's do all actions on the last probably a partial data at the end.
-            for (auto& action: m_actions)
+            for (auto& action : m_actions)
             {
                 if (m_trainer->TotalNumberOfSamplesSeen() % action.frequency != 0 &&
                     m_trainer->TotalNumberOfSamplesSeen() != action.sampleCountWhenLastCalled)
@@ -208,23 +206,24 @@ namespace CNTK
     void TrainingSession::CrossValidate(size_t currentIndex, const DeviceDescriptor& computeDevice)
     {
         std::unordered_map<Variable, ValuePtr> minibatch;
-        double accumulatedError = 0;
         double error;
-        size_t totalNumberOfSamples = 0;
-        size_t numberOfMinibatches = 0;
 
         auto checkpoint = m_crossValidationSource->GetCheckpointState();
         size_t sampleCount = 0;
-        while (GetCrossValidationMinibatch(minibatch, m_crossValidationSchedule[sampleCount], computeDevice))
+        do
         {
+            if (!GetCrossValidationMinibatch(minibatch, m_crossValidationSchedule[sampleCount], computeDevice))
+            {
+                break;
+            }
+
+            OnCrossValidationMinibatchStart();
             error = m_trainer->TestMinibatch(minibatch, computeDevice, sampleCount);
-            accumulatedError += error;
-            totalNumberOfSamples += sampleCount;
-            numberOfMinibatches++;
-        }
+            OnCrossValidationMinibatchEnd(currentIndex, error, sampleCount);
+        } while (true);
         m_crossValidationSource->RestoreFromCheckpoint(checkpoint);
 
-        OnCrossValidationEnd(currentIndex, accumulatedError / totalNumberOfSamples, totalNumberOfSamples, numberOfMinibatches);
+        OnCrossValidationEnd(currentIndex);
     }
 
     inline void TrainingSession::ReportProgress(size_t currentIndex)
